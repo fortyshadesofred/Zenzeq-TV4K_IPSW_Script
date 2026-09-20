@@ -6,3 +6,7 @@ ipsws
 sshramdisk
 .irecovery
 *.log
+handoff.md
+AGENTS.md
+CLAUDE.md
+*.bak

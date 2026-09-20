@@ -1,4 +1,106 @@
 #!/usr/bin/env bash
+# merge.sh - Reconciles and merges Zenzeq-TV4K_IPSW_Script and verygenericname-TV4K_IPSW_Script
+#
+# Usage:
+#   ./merge.sh [--dry-run] [--apply] [--target <zenzeq|upstream|both>] [--output-dir <path>]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARENT_DIR="$(dirname "$SCRIPT_DIR")"
+
+ZENZEQ_DIR="${ZENZEQ_DIR:-$PARENT_DIR/Zenzeq-TV4K_IPSW_Script}"
+UPSTREAM_DIR="${UPSTREAM_DIR:-$PARENT_DIR/verygenericname-TV4K_IPSW_Script}"
+
+DRY_RUN=0
+APPLY=0
+TARGET="both"
+OUTPUT_DIR=""
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  --dry-run             Preview actions without modifying any files (default)
+  --apply               Execute the merge and update repository files
+  --target <choice>     Target repository to update: 'zenzeq', 'upstream', or 'both' (default: both)
+  --output-dir <dir>    Write merged files to a custom destination directory
+  --zenzeq-dir <dir>    Path to Zenzeq repo (default: $ZENZEQ_DIR)
+  --upstream-dir <dir>  Path to verygenericname repo (default: $UPSTREAM_DIR)
+  -h, --help            Show this help message
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            APPLY=0
+            shift
+            ;;
+        --apply)
+            APPLY=1
+            DRY_RUN=0
+            shift
+            ;;
+        --target)
+            TARGET="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --zenzeq-dir)
+            ZENZEQ_DIR="$2"
+            shift 2
+            ;;
+        --upstream-dir)
+            UPSTREAM_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage
+            ;;
+    esac
+done
+
+if [ "$APPLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    DRY_RUN=1
+fi
+
+echo "========================================================"
+echo " TV4K_IPSW_Script Merge & Reconciliation Utility"
+echo "========================================================"
+echo "Zenzeq Repo:   $ZENZEQ_DIR"
+echo "Upstream Repo: $UPSTREAM_DIR"
+echo "Target:        $TARGET"
+echo "Mode:          $([ "$APPLY" -eq 1 ] && echo "APPLY (modifying files)" || echo "DRY-RUN (preview only)")"
+echo "========================================================"
+
+# Validate directories
+if [ ! -d "$ZENZEQ_DIR" ]; then
+    echo "Error: Zenzeq directory not found at $ZENZEQ_DIR" >&2
+    exit 1
+fi
+
+if [ ! -d "$UPSTREAM_DIR" ]; then
+    echo "Error: Upstream directory not found at $UPSTREAM_DIR" >&2
+    exit 1
+fi
+
+# Generate the merged makeipsw.sh content into a temporary file
+TMP_MERGED="$(mktemp -t merged_makeipsw.XXXXXX.sh)"
+trap 'rm -f "$TMP_MERGED"' EXIT
+
+cat << 'MERGED_EOF' > "$TMP_MERGED"
+#!/usr/bin/env bash
 # This is a script to make an IPSW for the Apple TV 4K (AppleTV6,2).
 # Reconciled and merged from verygenericname (upstream) & Zenzeq fork.
 
@@ -328,3 +430,83 @@ cd ../../
 sudo rm -rf work | true
 
 echo "Done! Your new ipsw is in ipsws/AppleTV6,2_${ipsw_version}_${ipsw_buildnumber}_Restore.ipsw"
+MERGED_EOF
+
+chmod +x "$TMP_MERGED"
+
+# Validate bash syntax of generated file
+bash -n "$TMP_MERGED"
+echo "✓ Merged makeipsw.sh syntax check passed."
+
+# Define binaries to sync into Darwin/
+EXTRA_BINARIES=("yaa" "KPlooshFinder" "iBoot64Patcher" "kerneldiff")
+
+apply_to_repo() {
+    local target_dir="$1"
+    local repo_name="$(basename "$target_dir")"
+    echo ""
+    echo "Processing target: $repo_name ($target_dir)..."
+
+    # 1. Update makeipsw.sh
+    if [ "$APPLY" -eq 1 ]; then
+        if [ -f "$target_dir/makeipsw.sh" ]; then
+            cp "$target_dir/makeipsw.sh" "$target_dir/makeipsw.sh.bak"
+            echo "  Backed up makeipsw.sh -> makeipsw.sh.bak"
+        fi
+        cp "$TMP_MERGED" "$target_dir/makeipsw.sh"
+        chmod +x "$target_dir/makeipsw.sh"
+        echo "  Updated makeipsw.sh with merged version."
+    else
+        echo "  [DRY-RUN] Would update makeipsw.sh (backup to makeipsw.sh.bak)"
+    fi
+
+    # 2. Sync missing Darwin binaries from upstream if missing
+    for bin in "${EXTRA_BINARIES[@]}"; do
+        local src="$UPSTREAM_DIR/Darwin/$bin"
+        local dst="$target_dir/Darwin/$bin"
+        if [ -f "$src" ] && [ ! -f "$dst" ]; then
+            if [ "$APPLY" -eq 1 ]; then
+                cp -p "$src" "$dst"
+                echo "  Synced Darwin/$bin from upstream."
+            else
+                echo "  [DRY-RUN] Would copy Darwin/$bin from upstream."
+            fi
+        fi
+    done
+}
+
+if [ -n "$OUTPUT_DIR" ]; then
+    echo "Writing merged assets to custom output directory: $OUTPUT_DIR"
+    if [ "$APPLY" -eq 1 ]; then
+        mkdir -p "$OUTPUT_DIR/Darwin"
+        cp "$TMP_MERGED" "$OUTPUT_DIR/makeipsw.sh"
+        chmod +x "$OUTPUT_DIR/makeipsw.sh"
+        cp -p "$UPSTREAM_DIR/Darwin/"* "$OUTPUT_DIR/Darwin/"
+        cp -p "$UPSTREAM_DIR/template.dmg" "$OUTPUT_DIR/"
+        cp -p "$UPSTREAM_DIR/LICENSE" "$OUTPUT_DIR/"
+        cp -p "$UPSTREAM_DIR/.gitignore" "$OUTPUT_DIR/"
+        echo "  Successfully populated $OUTPUT_DIR"
+    else
+        echo "  [DRY-RUN] Would create and populate $OUTPUT_DIR"
+    fi
+else
+    case "$TARGET" in
+        zenzeq)
+            apply_to_repo "$ZENZEQ_DIR"
+            ;;
+        upstream)
+            apply_to_repo "$UPSTREAM_DIR"
+            ;;
+        both)
+            apply_to_repo "$ZENZEQ_DIR"
+            apply_to_repo "$UPSTREAM_DIR"
+            ;;
+        *)
+            echo "Invalid target: $TARGET" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+echo ""
+echo "Merge complete! $([ "$APPLY" -eq 1 ] && echo "Changes applied successfully." || echo "Dry-run finished. Run with --apply to apply.")"
